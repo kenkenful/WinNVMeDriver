@@ -21,14 +21,7 @@ typedef struct _DEVICE_EXTENSION
 	UNICODE_STRING	ustrDeviceName;    
 	UNICODE_STRING	ustrSymLinkName;  
 	PVOID							InterruptObject;
-	//PUCHAR					portbase;							
-	//ULONG					nports;								
-	//PVOID						MemBar0;							
-	//ULONG					nMem0;							
-	//PVOID						MemBar1;							
-	//ULONG					nMem1;							
-	//PVOID						MemForImage;					
-	//BOOLEAN				mappedport;
+
 	BOOLEAN					bInterruptEnable;
 
 	PVOID							bar0;
