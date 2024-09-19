@@ -32,18 +32,19 @@ typedef struct _DEVICE_EXTENSION
 
 	PVOID							data_buffer;
 
+	ULONG						vector;
+
 	u32*							admin_sq_doorbell;
 	u32*							admin_cq_doorbell;
 	int								admin_sq_tail ;
 	int								admin_cq_head ;
 	int								admin_cq_phase;
 
-	int                             admin_sq_size;       ///< queue size
-	int                             admin_cq_size;       ///< queue size
+	int								admin_sq_size;       ///< queue size
+	int								admin_cq_size;       ///< queue size
 
-
-	nvme_sq_entry_t*				sq;
-	nvme_cq_entry_t*				cq;
+	//nvme_sq_entry_t*				sq;
+	//nvme_cq_entry_t*				cq;
 
 } DEVICE_EXTENSION, * PDEVICE_EXTENSION;
 
@@ -93,29 +94,26 @@ MSI_ISR(
 
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)ServiceContext;
 
-	nvme_cq_entry_t * cq = (nvme_cq_entry_t*)p->admin_cq_pvk;
+	nvme_cq_entry_t * admin_cq = (nvme_cq_entry_t*)p->admin_cq_pvk;
 	
-	DbgPrint("bar0 address: %p", p-> bar0);
+	if (MessageId == 0) {
+		if (admin_cq[p->admin_cq_head].u.a.p == p->admin_cq_phase) {
+			while (admin_cq[p->admin_cq_head].u.a.p == p->admin_cq_phase) {
+				//int head = p->admin_cq_head;
+				if (++p->admin_cq_head == p->admin_cq_size) {
+					p->admin_cq_head = 0;
+					p->admin_cq_phase = !p->admin_cq_phase;
+				}
 
-	DbgPrint("cq pahse: %d,    phase: %d", cq[p->admin_cq_head].u.a.p, p->admin_cq_phase);
-
-	DbgPrint("admin cqhead: %d", p->admin_cq_head);
-
-
-	if (cq[p->admin_cq_head].u.a.p == p->admin_cq_phase) {
-		while (cq[p->admin_cq_head].u.a.p == p->admin_cq_phase) {
-			int head = p->admin_cq_head;
-			DbgPrint("sqid: %d, cid: %d,  sc: %d, sct: %d \n", cq[head].sqid, cq[head].cid, cq[head].u.a.sc, cq[head].u.a.sct);
-			if (++p->admin_cq_head == p->admin_cq_size) {
-				p->admin_cq_head = 0;
-				p->admin_cq_phase = !p->admin_cq_phase;
+				*(volatile u32*)(p->admin_cq_doorbell) = p->admin_cq_head;
 			}
-
-			*(volatile u32*)(p->admin_cq_doorbell) = p->admin_cq_head;
-
-
 		}
-
+	}
+	else {
+	
+	
+	
+	
 	
 	}
 
@@ -131,7 +129,6 @@ FdoInterruptCallback(
 {
 	UNREFERENCED_PARAMETER(InterruptObject);
 	UNREFERENCED_PARAMETER(Context);
-
 	
 	return TRUE;
 }
@@ -187,8 +184,8 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 	pdx->admin_sq_doorbell = nullptr;
 	pdx->admin_cq_doorbell = nullptr;
 
-	pdx->sq = nullptr;
-	pdx->cq = nullptr;
+	//pdx->sq = nullptr;
+	//pdx->cq = nullptr;
 
 	pdx->data_buffer = nullptr;
 
@@ -300,15 +297,15 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 		case CmResourceTypeMemory:
 			pdx->bar_size = resource->u.Port.Length;
 			pdx ->bar0 = MmMapIoSpace(resource->u.Port.Start, resource->u.Port.Length, MmNonCached);
-			DbgPrint("bar0  kernel virtual address:  %p", pdx->bar0);
+			//DbgPrint("bar0  kernel virtual address:  %p", pdx->bar0);
 
-			DbgPrint("CmResourceTypeMemory ===> start 0x%lX 0x%lX length:%d\n",
-				resource->u.Port.Start.HighPart,
-				resource->u.Port.Start.LowPart,
-				resource->u.Port.Length);
+			//DbgPrint("CmResourceTypeMemory ===> start 0x%lX 0x%lX length:%d\n",
+			//	resource->u.Port.Start.HighPart,
+			//	resource->u.Port.Start.LowPart,
+			//	resource->u.Port.Length);
 			break;
 		case CmResourceTypeBusNumber:
-			DbgPrint("CmResourceTypeBusNumber:::");
+			//DbgPrint("CmResourceTypeBusNumber:::");
 			break;
 		case CmResourceTypeInterrupt:
 
@@ -393,7 +390,7 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 			//if (resource->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) {
 			//	DbgPrint("CM_RESOURCE_INTERRUPT_MESSAGE\n");
 			//}
-#endif
+
 
 			DbgPrint("resource flag: %x\n", resource->Flags);
 			DbgPrint("CmResourceTypeInterrupt   Translated ===> level:%X, vector:%X, affinity:%llX\n",
@@ -405,6 +402,8 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 				resource->u.MessageInterrupt.Translated.Level,
 				resource->u.MessageInterrupt.Translated.Vector,
 				resource->u.MessageInterrupt.Translated.Affinity);
+
+#endif
 			break;
 
 		case CmResourceTypeDma:
