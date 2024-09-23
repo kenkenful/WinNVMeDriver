@@ -13,6 +13,17 @@
 #define DEVICE_NAME			( L"\\Device\\WINNVME" )
 #define DEVICE_SYMLINKNAME	( L"\\DosDevices\\WINNVME" )
 
+UINT8 gucDeviceCounter;
+
+typedef struct _MEMORY {
+	ULONG Length;
+	PHYSICAL_ADDRESS LogicalAddress;
+	PVOID	  testBuffer;
+	PVOID  pvu;
+	PMDL  pMdl;
+
+}MEMORY, *PMEMORY;
+
 typedef struct _DEVICE_EXTENSION
 {
 	PDEVICE_OBJECT		fdo;
@@ -27,21 +38,33 @@ typedef struct _DEVICE_EXTENSION
 	PVOID							bar0;
 	SIZE_T							bar_size;
 
-	PVOID							admin_sq_pvk;
-	PVOID							admin_cq_pvk;
+	//PVOID							admin_sq_pvk;
+	//PVOID							admin_cq_pvk;
 
-	PVOID							data_buffer;
+	//PVOID							data_buffer;
 
 	ULONG						vector;
 
 	u32*							admin_sq_doorbell;
 	u32*							admin_cq_doorbell;
+
 	int								admin_sq_tail ;
 	int								admin_cq_head ;
 	int								admin_cq_phase;
 
 	int								admin_sq_size;       ///< queue size
 	int								admin_cq_size;       ///< queue size
+
+	_DMA_ADAPTER*   dmaAdapter;
+	ULONG						NumOfMappedRegister;
+
+	MEMORY					admin_sq;
+	MEMORY					admin_cq;
+
+	//MEMORY					io_sq;
+	//MEMORY					io_cq;
+
+	MEMORY					data_buffer;
 
 	//nvme_sq_entry_t*				sq;
 	//nvme_cq_entry_t*				cq;
@@ -77,7 +100,6 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING pRegist
 	return STATUS_SUCCESS;
 }
 
-UINT8 gucDeviceCounter;
 
 
 BOOLEAN
@@ -94,7 +116,7 @@ MSI_ISR(
 
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)ServiceContext;
 
-	nvme_cq_entry_t * admin_cq = (nvme_cq_entry_t*)p->admin_cq_pvk;
+	nvme_cq_entry_t * admin_cq = (nvme_cq_entry_t*)p->admin_cq.testBuffer;
 	
 	if (MessageId == 0) {
 		if (admin_cq[p->admin_cq_head].u.a.p == p->admin_cq_phase) {
@@ -144,7 +166,8 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 
 	//DECLARE_UNICODE_STRING_SIZE(devName, 64);
 	//DECLARE_UNICODE_STRING_SIZE(symLinkName, 64);
-	
+
+
 	wchar_t  devNameReal[64] = { 0 };
 	wchar_t  symLinkNameReal[64] = { 0 };
 	swprintf(devNameReal, L"%s%d", DEVICE_NAME, gucDeviceCounter);
@@ -170,6 +193,35 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 		return status;
 	}
 
+#if 1
+	DEVICE_DESCRIPTION DeviceDescription;
+
+	RtlZeroMemory(&DeviceDescription, sizeof(DEVICE_DESCRIPTION));
+	DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION;
+	DeviceDescription.Master = TRUE;
+	DeviceDescription.ScatterGather = TRUE;
+	DeviceDescription.Dma32BitAddresses = TRUE;
+	DeviceDescription.Dma64BitAddresses = TRUE;
+	DeviceDescription.InterfaceType = PCIBus;
+	DeviceDescription.MaximumLength = 0x100000;
+
+	pdx->dmaAdapter = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &pdx->NumOfMappedRegister);
+
+	if (!pdx->dmaAdapter) {
+		DbgPrint("Failure IoGetDmaAdapter\n");
+
+		if (pdx->NextStackDevice)
+		{
+			IoDetachDevice(pdx->NextStackDevice);
+		}
+
+		IoDeleteDevice(pdx->fdo);
+
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+#endif
+
 	//RtlUnicodeStringPrintf(&symLinkName, L"\\DosDevices\\WINMEM_%d", gucDeviceCounter);
 
 	swprintf(symLinkNameReal, L"%s_%d", DEVICE_SYMLINKNAME, gucDeviceCounter);
@@ -187,10 +239,10 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 	//pdx->sq = nullptr;
 	//pdx->cq = nullptr;
 
-	pdx->data_buffer = nullptr;
+	//pdx->data_buffer = nullptr;
 
-	pdx->admin_cq_pvk = nullptr;
-	pdx->admin_sq_pvk = nullptr;
+	//pdx->admin_cq_pvk = nullptr;
+	//pdx->admin_sq_pvk = nullptr;
 
 	pdx->bar0 = nullptr;
 
@@ -212,6 +264,9 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 		}
 	}
 
+
+	
+
 	fdo->Flags |= DO_BUFFERED_IO | DO_POWER_PAGABLE;
 	fdo->Flags &= ~DO_DEVICE_INITIALIZING;
 
@@ -221,16 +276,11 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 	return STATUS_SUCCESS;
 }
 
-
-
 NTSTATUS DefaultPnpHandler(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
 	IoSkipCurrentIrpStackLocation(Irp);
 	return IoCallDriver(pdx->NextStackDevice, Irp);
 }
-
-
-
 
 NTSTATUS OnRequestComplete(PDEVICE_OBJECT junk, PIRP Irp, PKEVENT pev)
 {
@@ -248,7 +298,7 @@ NTSTATUS ForwardAndWait(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	KeInitializeEvent(&event, NotificationEvent, FALSE);
 	IoCopyCurrentIrpStackLocationToNext(Irp);
-	IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE)OnRequestComplete, (PVOID) & event, TRUE, TRUE, TRUE);
+	IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE)OnRequestComplete, (PVOID) &event, TRUE, TRUE, TRUE);
 
 	IoCallDriver(pdx->NextStackDevice, Irp);
 	KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
@@ -267,7 +317,7 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 	//IO_CONNECT_INTERRUPT_PARAMETERS     Connect;
 	//IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
 
-	UNREFERENCED_PARAMETER(pdx);
+	//UNREFERENCED_PARAMETER(pdx);
 	//PIO_INTERRUPT_MESSAGE_INFO  p;
 	//PIO_INTERRUPT_MESSAGE_INFO_ENTRY pp;
 	//NTSTATUS status;
@@ -296,7 +346,7 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 		case CmResourceTypePort:
 		case CmResourceTypeMemory:
 			pdx->bar_size = resource->u.Port.Length;
-			pdx ->bar0 = MmMapIoSpace(resource->u.Port.Start, resource->u.Port.Length, MmNonCached);
+			pdx->bar0 = MmMapIoSpace(resource->u.Port.Start, resource->u.Port.Length, MmNonCached);
 			//DbgPrint("bar0  kernel virtual address:  %p", pdx->bar0);
 
 			//DbgPrint("CmResourceTypeMemory ===> start 0x%lX 0x%lX length:%d\n",
@@ -404,6 +454,11 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 				resource->u.MessageInterrupt.Translated.Affinity);
 
 #endif
+
+			//if (resource->u.MessageInterrupt.Translated.Vector <= 128) {
+			//	pdx->vector = resource->u.MessageInterrupt.Translated.Vector;
+			//}
+
 			break;
 
 		case CmResourceTypeDma:
@@ -413,22 +468,13 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 	}    // for each resource
 }       // ShowResources
 
-
-
-
-
-
 BOOLEAN OnInterrupt(PKINTERRUPT InterruptObject, PDEVICE_EXTENSION pdx)
 {   
 	UNREFERENCED_PARAMETER(InterruptObject);
 	UNREFERENCED_PARAMETER(pdx);
 	
-
 	return TRUE;
 }
-
-
-
 
 NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
@@ -447,7 +493,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	//UINT8		buffer[256] = { 0 };
 	UINT16     command_reg;
 
-	UINT32 i = 0;
+	//UINT32 i = 0;
 
 	status = ForwardAndWait(pdx, Irp);        
 	
@@ -515,7 +561,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	Connect.MessageBased.MessageServiceRoutine = MSI_ISR;
 	Connect.MessageBased.SynchronizeIrql = 0;
 	Connect.MessageBased.ServiceContext = pdx;
-	Connect.MessageBased.FallBackServiceRoutine = FdoInterruptCallback;
+	Connect.MessageBased.FallBackServiceRoutine = nullptr;
 
 	status = IoConnectInterruptEx(&Connect);
 
@@ -526,7 +572,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		pp = p->MessageInfo;
 		DbgPrint("interrupt version: %d", Connect.Version);
 
-		for ( i = 0; i < p->MessageCount; ++i) {
+		for (int  i = 0; i < (int)p->MessageCount; ++i) {
 			DbgPrint("IoConnectInterruptEx params ===> Irql:%X, Vector:%X, Proc:%llX, MessageData:%lX, MessageAddress:%lX\n",
 				(pp + i)->Irql,
 				(pp + i)->Vector,
@@ -539,11 +585,12 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 #endif
 
+#if 1
+
 	// Check bus Master
 	status = ReadWriteConfigSpace(pdx->fdo, 0, &command_reg, 4, 2);
 
 	DbgPrint("Command Register: 0x%X", command_reg);
-
 
 	nvme_controller_reg_t* ctrl_reg = (nvme_controller_reg_t*)(pdx ->bar0)  ;
 
@@ -558,32 +605,50 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	while (ctrl_reg->csts.rdy == 1) {
 		DbgPrint("Waiting  controller disable");
-
 		WinNVMeDelay(1);
-	
 	}
-#if 1
+
+
 
 	// Create Completion Queue
-	PHYSICAL_ADDRESS pa = { 0x3, (LONG)0xffffffff };
-	pdx -> admin_cq_pvk = MmAllocateContiguousMemory(sizeof(nvme_cq_entry_t) * 64, pa);
+	//PHYSICAL_ADDRESS pa = { 0x3, (LONG)0xffffffff };
+	//pdx -> admin_cq_pvk = MmAllocateContiguousMemory(sizeof(nvme_cq_entry_t) * 64, pa);
+	//PHYSICAL_ADDRESS cq_phyaddr = MmGetPhysicalAddress(pdx->admin_cq_pvk);
+	//DbgPrint("Admin CQ: %llX  ", cq_phyaddr.QuadPart);
 
-	PHYSICAL_ADDRESS cq_phyaddr = MmGetPhysicalAddress(pdx->admin_cq_pvk);
-	DbgPrint("Admin CQ: %llX  ", cq_phyaddr.QuadPart);
-	
+	if (pdx->dmaAdapter) {
+		pdx->admin_cq.testBuffer = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx -> dmaAdapter,
+			4096,
+			&pdx->admin_cq.LogicalAddress,
+			FALSE
+		);
+	}
+
 
 	//  Create Submission Queue
 	 //pa = { 0x3, (LONG)0xffffffff };
-	 pdx -> admin_sq_pvk   = MmAllocateContiguousMemory(sizeof(nvme_sq_entry_t) * 64, pa);
+	 //pdx -> admin_sq_pvk   = MmAllocateContiguousMemory(sizeof(nvme_sq_entry_t) * 64, pa);
 
-	 PHYSICAL_ADDRESS sq_phyaddr = MmGetPhysicalAddress(pdx->admin_sq_pvk);
-	 DbgPrint("Admin SQ: %llX  ", sq_phyaddr.QuadPart);
+	 //PHYSICAL_ADDRESS sq_phyaddr = MmGetPhysicalAddress(pdx->admin_sq_pvk);
+	 //DbgPrint("Admin SQ: %llX  ", sq_phyaddr.QuadPart);
+
+	if (pdx->dmaAdapter) {
+		pdx->admin_sq.testBuffer = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			&pdx->admin_sq.LogicalAddress,
+			FALSE
+		);
+	}
 
 
 	
-	nvme_cq_entry_t* cq = (nvme_cq_entry_t*)pdx->admin_cq_pvk;
-
+	nvme_cq_entry_t* cq = (nvme_cq_entry_t*)pdx->admin_cq.testBuffer;
 	RtlZeroMemory(cq, sizeof(nvme_cq_entry_t) * 64);
+
+	nvme_sq_entry_t* sq = (nvme_sq_entry_t*)pdx->admin_sq.testBuffer;
+	RtlZeroMemory(sq, sizeof(nvme_sq_entry_t) * 64);
 
 	 pdx->admin_sq_size = 64;
 	 pdx->admin_cq_size = 64;
@@ -592,8 +657,11 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	 aqa.a.acqs = 64 - 1;
 	 ctrl_reg->aqa.val = aqa.val;
 
-	 ctrl_reg->asq = sq_phyaddr.QuadPart;
-	 ctrl_reg->acq = cq_phyaddr.QuadPart;
+	 //ctrl_reg->asq = sq_phyaddr.QuadPart;
+	 //ctrl_reg->acq = cq_phyaddr.QuadPart;
+
+	 ctrl_reg->asq = pdx->admin_sq.LogicalAddress.QuadPart;
+	 ctrl_reg->acq = pdx->admin_cq.LogicalAddress.QuadPart;;
 
 	 ctrl_reg->aqa.val = aqa.val;
 
@@ -614,29 +682,35 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	while (ctrl_reg->csts.rdy == 0) {
 		DbgPrint("Waiting  controller ready");
-
 		WinNVMeDelay(1);
-
 	}
 
 	
 	//Data Buffer
-	pa = { 0x3, (LONG)0xffffffff };
-	pdx->data_buffer = MmAllocateContiguousMemory(4096, pa);
+	//pa = { 0x3, (LONG)0xffffffff };
+	//pdx->data_buffer = MmAllocateContiguousMemory(4096, pa);
 
-	PHYSICAL_ADDRESS data = MmGetPhysicalAddress(pdx->data_buffer);
-	DbgPrint("Data Buffer: %llX  ", data.QuadPart);
+	//PHYSICAL_ADDRESS data = MmGetPhysicalAddress(pdx->data_buffer);
+	//DbgPrint("Data Buffer: %llX  ", data.QuadPart);
 
-#if 1
+	if (pdx->dmaAdapter) {
+		pdx->data_buffer.testBuffer = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			&pdx->data_buffer.LogicalAddress,
+			FALSE
+		);
+	}
+
+
 	int cid = pdx->admin_sq_tail;
 
-	nvme_sq_entry_t* sq = (nvme_sq_entry_t*)pdx->admin_sq_pvk;
 	if (sq != nullptr) {
 		sq[cid].get_log_page.opcode = nvme_admin_get_log_page;
 
 		sq[cid].get_log_page.command_id = (u16)cid;
 		sq[cid].get_log_page.nsid = 0xffffffff;
-		sq[cid].get_log_page.dptr.prp1 = data.QuadPart;
+		sq[cid].get_log_page.dptr.prp1 = pdx->data_buffer.LogicalAddress.QuadPart;
 
 		sq[cid].get_log_page.lid = 2;
 
@@ -649,7 +723,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	*(volatile u32*)pdx->admin_sq_doorbell = pdx->admin_sq_tail;
 
-#endif
+
 
 #endif
 
@@ -719,22 +793,60 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	status = DefaultPnpHandler(pdx, Irp);
 
-	if (pdx->data_buffer) {
-		DbgPrint("delete data_buffer");
-		MmFreeContiguousMemory(pdx->data_buffer);
+	//if (pdx->data_buffer) {
+	//	DbgPrint("delete data_buffer");
+	//	MmFreeContiguousMemory(pdx->data_buffer);
+	//}
+
+	//if (pdx->admin_cq_pvk) {
+	//	DbgPrint("delete admin compeletion queue");
+	//	MmFreeContiguousMemory(pdx->admin_cq_pvk);
+	//}
+
+	//if (pdx->admin_sq_pvk) {
+	//	DbgPrint("delete admin submission queue");
+	//	MmFreeContiguousMemory(pdx->admin_sq_pvk);
+	//}
+
+#if 1
+	if (pdx->admin_sq.testBuffer) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			pdx->admin_sq.LogicalAddress,
+			pdx->admin_sq.testBuffer,
+			FALSE
+		);
+	}
+
+	if (pdx->admin_cq.testBuffer) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			pdx->admin_cq.LogicalAddress,
+			pdx->admin_cq.testBuffer,
+			FALSE
+		);
+	}
+
+	if (pdx->data_buffer.testBuffer) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			pdx->data_buffer.LogicalAddress,
+			pdx->data_buffer.testBuffer,
+			FALSE
+		);
 	}
 
 
-	if (pdx->admin_cq_pvk) {
-		DbgPrint("delete admin compeletion queue");
-		MmFreeContiguousMemory(pdx->admin_cq_pvk);
-	}
-
-	if (pdx->admin_sq_pvk) {
-		DbgPrint("delete admin submission queue");
-		MmFreeContiguousMemory(pdx->admin_sq_pvk);
+	if (pdx->dmaAdapter != nullptr) {
+		pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
+	
 	}
 	
+#endif
+
 	if (pdx -> bInterruptEnable) {
 		DbgPrint("IoDisconnectInterruptEx");
 
@@ -966,72 +1078,3 @@ void WinNVMeDelay(long long millsecond)
 	delayTrue.QuadPart = -(delayValue.QuadPart);
 	ntRet = KeDelayExecutionThread(KernelMode, FALSE, &delayTrue);
 }
-
-#if 0
-NTSTATUS ReadWriteConfigSpace(
-	IN PDEVICE_OBJECT DeviceObject,
-	IN ULONG ReadOrWrite, // 0 for read 1 for write
-	IN PVOID Buffer,
-	IN ULONG Offset,
-	IN ULONG Length
-)
-{
-	KEVENT				event;
-	NTSTATUS			status;
-	PIRP				irp;
-	IO_STATUS_BLOCK		ioStatusBlock;
-	PIO_STACK_LOCATION	irpStack;
-	PDEVICE_OBJECT		targetObject;
-
-	PAGED_CODE();
-
-	KeInitializeEvent(&event, NotificationEvent, FALSE);
-
-	targetObject = IoGetAttachedDeviceReference(DeviceObject);
-
-	irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP, targetObject, NULL, 0, NULL, &event, &ioStatusBlock);
-
-	if (irp == NULL)
-	{
-		status = STATUS_INSUFFICIENT_RESOURCES;
-		goto End;
-	}
-
-	irpStack = IoGetNextIrpStackLocation(irp);
-
-	if (ReadOrWrite == 0)
-	{
-		irpStack->MinorFunction = IRP_MN_READ_CONFIG;
-	}
-	else
-	{
-		irpStack->MinorFunction = IRP_MN_WRITE_CONFIG;
-	}
-
-	irpStack->Parameters.ReadWriteConfig.WhichSpace = PCI_WHICHSPACE_CONFIG;
-	irpStack->Parameters.ReadWriteConfig.Buffer = Buffer;
-	irpStack->Parameters.ReadWriteConfig.Offset = Offset;
-	irpStack->Parameters.ReadWriteConfig.Length = Length;
-
-	//
-	// Initialize the status to error in case the bus driver does not
-	// set it correctly.
-	//
-
-	irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
-
-	status = IoCallDriver(targetObject, irp);
-
-	if (status == STATUS_PENDING)
-	{
-		KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
-		status = ioStatusBlock.Status;
-	}
-
-End:
-	// Done with reference
-	ObDereferenceObject(targetObject);
-
-	return status;
-}
-#endif
